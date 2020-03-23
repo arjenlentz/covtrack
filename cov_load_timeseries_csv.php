@@ -70,6 +70,13 @@ $confirmed = read_timeseries_csv($filepath.TIMESERIES_CONFIRMED);
 $deaths = read_timeseries_csv($filepath.TIMESERIES_DEATHS);
 $recovered = read_timeseries_csv($filepath.TIMESERIES_RECOVERED);
 
+// Grab header row, then remove it from dataset arrays
+$header = $confirmed['header'];
+unset($confirmed['header']);
+unset($deaths['header']);
+unset($recovered['header']);
+
+
 // Because we're processing all these three datasets in parallel,
 // we have to ensure they're same # cols and same # cols, as it should be!
 // Not an ideal input format really, but if we check it should be ok.
@@ -78,11 +85,8 @@ $rows = count($confirmed);
 if ($rows != count($deaths) || $rows != count($recovered))
     die("The timeseries CSV files have different number of rows\n");
 
-$cols = count($confirmed['header']);
+$cols = count($header);
 foreach ($confirmed as $key => $row) {
-    if ($key == 'header')
-        continue;
-
 /*
     Don't need to catch these, we'll deal with them on the fly
     if (!in_array($key, $deaths))
@@ -91,10 +95,9 @@ foreach ($confirmed as $key => $row) {
         print("Location '$key' from confirmed not in recovered\n");
 */
     if ($cols != count($confirmed[$key]) || $cols != count($deaths[$key]) || $cols != count($recovered[$key])) {
-        die("Different number of columns on timeseries row $i\n");
+        die("Different number of columns on timeseries row '$key'\n");
     }
 }
-$header = $confirmed['header'];
 
 
 
@@ -113,23 +116,26 @@ if ($db->connect_error) {
         country     VARCHAR(50) NOT NULL,
         lat         DECIMAL(7,4),
         lon         DECIMAL(7,4),
-        UNIQUE KEY  (stateprov,country)
+        UNIQUE KEY  (stateprov,country),
+        INDEX       (country)
     ) ENGINE=InnoDB;
 */
 
-$put_location_query = 'INSERT IGNORE INTO locations (stateprov,country,lat,lon) (?,?,?,?)';
+$put_location_query = 'INSERT IGNORE INTO locations (stateprov,country,lat,lon) VALUES (?,?,?,?)';
 $put_location_stmt = $db->prepare($put_location_query);
 
 // step through countries (skipping header line)
-for ($i = 1; $i < $rows; $i++) {
-    $location_stateprov = $confirmed[$i][0];
-    $location_country = $confirmed[$i][1];
-    $location_lat = $confirmed[$i][2];
-    $location_lon = $confirmed[$i][3];
+foreach ($confirmed as $key => $row) {
+    $location_stateprov = $confirmed[$key][0];
+    $location_country = $confirmed[$key][1];
+    $location_lat = $confirmed[$key][2];
+    $location_lon = $confirmed[$key][3];
 
-    $put_location_stmt->bind_param($location_stateprov, $location_country, $location_lat, $location_lon);
+    $put_location_stmt->bind_param('ssss', $location_stateprov, $location_country, $location_lat, $location_lon);
     $put_location_stmt->execute();
 }
+$put_location_stmt->close();
+
 
 // creating a lookup array for stateprov/country -> id
 $get_location_query = 'SELECT id,stateprov,country FROM locations';
@@ -138,7 +144,8 @@ $get_location_stmt->execute();
 $get_location_stmt->bind_result($location_id, $location_stateprov, $location_country);
 $location_lookup = array();
 while ($get_location_stmt->fetch()) {
-    $location_lookup[trim($location_stateprov . ' ' . $location_country)] = $location_id;
+    $key = trim($location_stateprov . ' ' . $location_country);
+    $location_lookup[$key] = $location_id;
 }
 $get_location_stmt->close();
 
@@ -193,7 +200,7 @@ for ($i = 1; $i < $rows; $i++) {
         $deaths_new     = $deaths_total     - $last_deaths_total;
         $recovered_new  = $recovered_total  - $last_recovered_total;
 
-        $put_item_stmt->bind_param($location_id,$recdate,
+        $put_item_stmt->bind_param('isssssssssssss', $location_id, $recdate,
                                     $confirmed_total,$deaths_total,$recovered_total,$confirmed_new,$deaths_new,$recovered_new,
                                     $confirmed_total,$deaths_total,$recovered_total,$confirmed_new,$deaths_new,$recovered_new
                                 );

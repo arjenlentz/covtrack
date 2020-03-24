@@ -47,7 +47,24 @@ function read_timeseries_csv($fname)
         $arr = fgetcsv($fp);
         if (is_null($arr) || !is_array($arr) || count($arr) < 5)
             continue;
-        //print_r($arr);
+
+        // We have data from County (US only), State/Province (Australia,Canada,China,US), and Country.
+        // If we tally all that in the same table, we'll be double-counting people!
+        // To fix this, we will:
+
+        // - Not import the County-level data at all.
+        if ($arr[1] == 'US' && ($arr[0] == 'US' || strchr(',', $arr[0])))
+            continue;
+
+        // - Import State/Province-level data in a separate table.
+        // We handle (later) that during processing.
+ 
+        // Some countries also have external territories, but they're not like a province or county so we keep them separate.
+        // In our input data for the main country of those situations, the stateprov is same as country, so we clear that.
+        // That way all countries will look the same
+        if ($arr[0] == $arr[1])
+            $arr[0] = '';
+
         $data[trim($arr[0] . ' ' . $arr[1])] = $arr;
     }
 

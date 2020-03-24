@@ -16,6 +16,14 @@ define ('DB_NAME', 'covtrack');
 
 
 
+function exception_error_handler($errno, $errstr, $errfile, $errline ) {
+    debug_print_backtrace();
+    throw new ErrorException($errstr, $errno, 0, $errfile, $errline);
+}
+set_error_handler("exception_error_handler");
+
+
+
 function read_timeseries_csv($fname)
 {
     $data = array();
@@ -37,7 +45,7 @@ function read_timeseries_csv($fname)
 
     while (!feof($fp)) {
         $arr = fgetcsv($fp);
-        if (is_null($arr) || count($arr) < 5)
+        if (is_null($arr) || !is_array($arr) || count($arr) < 5)
             continue;
         //print_r($arr);
         $data[trim($arr[0] . ' ' . $arr[1])] = $arr;
@@ -108,9 +116,8 @@ if ($db->connect_error) {
     die('Connect Error (' . $db->connect_errno . ') ' . $db->connect_error);
 }
 
-
-/*
-    CREATE TABLE locations (
+$create_locations_table_query = '
+    CREATE TABLE IF NOT EXISTS locations (
         id          INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         stateprov   VARCHAR(50) NOT NULL,
         country     VARCHAR(50) NOT NULL,
@@ -118,13 +125,17 @@ if ($db->connect_error) {
         lon         DECIMAL(7,4),
         UNIQUE KEY  (stateprov,country),
         INDEX       (country)
-    ) ENGINE=InnoDB;
-*/
+    ) ENGINE=InnoDB
+';
+$db->query($create_locations_table_query);
+
+
+$db->begin_transaction();
 
 $put_location_query = 'INSERT IGNORE INTO locations (stateprov,country,lat,lon) VALUES (?,?,?,?)';
 $put_location_stmt = $db->prepare($put_location_query);
 
-// step through countries (skipping header line)
+// step through countries
 foreach ($confirmed as $key => $row) {
     $location_stateprov = $confirmed[$key][0];
     $location_country = $confirmed[$key][1];
@@ -135,6 +146,8 @@ foreach ($confirmed as $key => $row) {
     $put_location_stmt->execute();
 }
 $put_location_stmt->close();
+
+$db->commit();
 
 
 // creating a lookup array for stateprov/country -> id
@@ -148,69 +161,79 @@ while ($get_location_stmt->fetch()) {
     $location_lookup[$key] = $location_id;
 }
 $get_location_stmt->close();
+ksort($location_lookup);    // sort array by key, predictable processing order
 
 
-die("STOP MARK\n");
+$create_items_table_query = '
+    CREATE TABLE items (
+        id                  INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        location_id         INT UNSIGNED NOT NULL,
+        recdate             DATE,
+        confirmed_total     INT UNSIGNED NOT NULL,
+        deaths_total        INT UNSIGNED NOT NULL,
+        recovered_total     INT UNSIGNED NOT NULL,
+        confirmed_new       INT UNSIGNED NOT NULL,
+        deaths_new          INT UNSIGNED NOT NULL,
+        recovered_new       INT UNSIGNED NOT NULL,
+        confirmed_active    INT UNSIGNED NOT NULL,
+        UNIQUE KEY          (location_id,recdate),
+        INDEX               (recdate)
+    ) ENGINE=InnoDB
+';
+$db->query($create_items_table_query);
 
 
-/*
-    CREATE TABLE item (
-        id              INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-        location_id     INT UNSIGNED NOT NULL,
-        recdate         DATE,
-        confirmed_total INT UNSIGNED NOT NULL,
-        deaths_total    INT UNSIGNED NOT NULL,
-        recovered_total INT UNSIGNED NOT NULL,
-        confirmed_new   INT UNSIGNED NOT NULL,
-        deaths_new      INT UNSIGNED NOT NULL,
-        recovered_new   INT UNSIGNED NOT NULL,
-        UNIQUE KEY      (location_id,recdate),
-        INDEX           (recdate)
-    ) ENGINE=InnoDB;
-*/
+$db->begin_transaction();
 
 // try and insert, or update the data within the key (location_id,recdate)
-$put_item_query = 'INSERT INTO item (location_id,recdate,confirmed_total,deaths_total,recovered_total,confirmed_new,deaths_new,recovered_new)'
-            . ' VALUES (?,?,?,?,?,?,?,?)'
-            . ' ON DUPLICATE KEY UPDATE '
-                    . 'confirmed_total=?, deaths_total=?, recovered_total=?,'
-                    . 'confirmed_new=?, deaths_new=?, recovered_new=?';
+$put_item_query = 'INSERT INTO items (location_id,recdate,confirmed_total,deaths_total,recovered_total,confirmed_new,deaths_new,recovered_new,confirmed_active)'
+            . ' VALUES (?,?,?,?,?,?,?,?,?)'
+            . ' ON DUPLICATE KEY UPDATE'
+                    . ' confirmed_total=?, deaths_total=?, recovered_total=?,'
+                    . ' confirmed_new=?, deaths_new=?, recovered_new=?,'
+                    . ' confirmed_active=?';
 $put_item_stmt = $db->prepare($put_item_query);
 
-// step through countries (skipping header line)
-for ($i = 1; $i < $rows; $i++) {
-    $location_key = trim($confirmed[$i][0] . ' ' . $confirmed[$i][1]);
-    if (!in_array($location_lookup, $location_lookup))
-        die("Location key $location_key not find in location lookup array\n");
-    $location_id = $location_lookup[$location_key];
+// step through countries
+foreach ($confirmed as $key => $row) {
+    if (!array_key_exists($key, $location_lookup))
+        die("Location key '$key' not find in location lookup array\n");
+    $location_id = $location_lookup[$key];
 
     $last_confirmed_total = $last_deaths_total = $last_recovered_total = 0;
     // step through dates within this country
     for ($col = 4; $col < $cols; $col++) {
         // grab date of this column
-        $recdate = $header[$i][$col];
+        $recdate = $header[$col];
 
         // the numbers from the timeseries CSVs
-        $confirmed_total    = $confirmed[$i][$col];
-        $deaths_total       = $deaths[$i][$col];
-        $recovered_total    = $recovered[$i][$col];
+        // dirty dataset from 2020-03-23: some columns empty rather than 0
+        $confirmed_total    = is_numeric($row[$col]) ? $row[$col] : 0;
+        $deaths_total       = array_key_exists($key, $deaths) && is_numeric($deaths[$key][$col]) ? $deaths[$key][$col] : 0;
+        $recovered_total    = array_key_exists($key, $recovered) && is_numeric($recovered[$key][$col]) ? $recovered[$key][$col] : 0;
 
         // calculate some extra data while we're here
-        $confirmed_new  = $confirmed_total  - $last_confirmed_total;
-        $deaths_new     = $deaths_total     - $last_deaths_total;
-        $recovered_new  = $recovered_total  - $last_recovered_total;
+        $confirmed_new      = $confirmed_total  - $last_confirmed_total;
+        $deaths_new         = $deaths_total     - $last_deaths_total;
+        $recovered_new      = $recovered_total  - $last_recovered_total;
 
-        $put_item_stmt->bind_param('isssssssssssss', $location_id, $recdate,
-                                    $confirmed_total,$deaths_total,$recovered_total,$confirmed_new,$deaths_new,$recovered_new,
-                                    $confirmed_total,$deaths_total,$recovered_total,$confirmed_new,$deaths_new,$recovered_new
+        $confirmed_active   = $confirmed_total - ($deaths_total + $recovered_total);
+
+        $put_item_stmt->bind_param('isiiiiiiiiiiiiii', $location_id, $recdate,
+                                    $confirmed_total, $deaths_total, $recovered_total, $confirmed_new, $deaths_new, $recovered_new, $confirmed_active,
+                                    $confirmed_total, $deaths_total, $recovered_total, $confirmed_new, $deaths_new, $recovered_new, $confirmed_active
                                 );
         $put_item_stmt->execute();
+
+        $last_confirmed_total   = $confirmed_total;
+        $last_deaths_total      = $deaths_total;
+        $last_recovered_total   = $recovered_total;
     }
-
-    $put_item_stmt->close();
-
-    $db->close();
 }
+$put_item_stmt->close();
+$db->commit();
+
+$db->close();
 
 
 // end of file

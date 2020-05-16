@@ -8,9 +8,9 @@
     Tracking data from https://github.com/CSSEGISandData/COVID-19
 */
 
-define ('TIMESERIES_CONFIRMED'  , 'time_series_19-covid-Confirmed.csv');
-define ('TIMESERIES_DEATHS'     , 'time_series_19-covid-Deaths.csv');
-define ('TIMESERIES_RECOVERED'  , 'time_series_19-covid-Recovered.csv');
+define ('TIMESERIES_CONFIRMED'  , 'time_series_covid19_confirmed_global.csv');
+define ('TIMESERIES_DEATHS'     , 'time_series_covid19_deaths_global.csv');
+define ('TIMESERIES_RECOVERED'  , 'time_series_covid19_recovered_global.csv');
 
 define ('DB_NAME', 'covtrack');
 
@@ -48,12 +48,16 @@ function read_timeseries_csv($fname)
         if (is_null($arr) || !is_array($arr) || count($arr) < 5)
             continue;
 
+        // Dirty data: contains a stateprov "Recovered" for confirmed/deaths files for Canada
+        if ($arr[0] == 'Recovered')
+            continue;
+
         // We have data from County (US only), State/Province (Australia,Canada,China,US), and Country.
         // If we tally all that in the same table, we'll be double-counting people!
         // To fix this, we will:
 
         // - Not import the County-level data at all.
-        if ($arr[1] == 'US' && ($arr[0] == 'US' || strchr(',', $arr[0])))
+        if ($arr[1] == 'US' && ($arr[0] == 'US' || strchr($arr[0],',')))
             continue;
 
         // - Import State/Province-level data in a separate table.
@@ -102,13 +106,42 @@ unset($deaths['header']);
 unset($recovered['header']);
 
 
+function aggregate_stateprov_to_country ($country, &$dataset)
+{
+    $dataset[$country][0] = '';         // stateprov
+    $dataset[$country][1] = $country;
+    $dataset[$country][2] = 0;          // lat (yep so we lose that info on aggregation)
+    $dataset[$country][3] = 0;          // lon
+
+    foreach ($dataset as $key => $row) {
+        if ($row[1] != $country || empty($row[0]))
+            continue;
+
+        for ($i = 4; $i < count($row); $i++) {
+            if (!isset($dataset[$country][$i]))
+                $dataset[$country][$i] = $row[$i];
+            else
+                $dataset[$country][$i] += $row[$i];
+        }
+
+        unset($dataset[$key]);
+    }
+}
+
+aggregate_stateprov_to_country('Canada',$confirmed);
+aggregate_stateprov_to_country('Canada',$deaths);
+
+
 // Because we're processing all these three datasets in parallel,
-// we have to ensure they're same # cols and same # cols, as it should be!
+// we have to ensure they're same # cols, as it should be!
 // Not an ideal input format really, but if we check it should be ok.
 // They don't have the same country on the same row, so we do that differently already.
+
+/* No need to check this, we just run on any country that has confirmed cases
 $rows = count($confirmed);
 if ($rows != count($deaths) || $rows != count($recovered))
     die("The timeseries CSV files have different number of rows\n");
+*/
 
 $cols = count($header);
 foreach ($confirmed as $key => $row) {

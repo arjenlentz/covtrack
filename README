@@ -1,0 +1,14 @@
+Assorted notes...
+
+This tool uses data from https://github.com/CSSEGISandData/COVID-19
+Clone that repo, and pull once a day for updates, then run the script to update your database.
+
+Data for previous days can (and frequently is) updated also, and the script processes this properly as well.
+Keep that in mind when you calculate aggregates, you'll have to re-run those as well.
+
+The PHP script is hardcoded to use the dbname covtrack, but it's an easy define near the top.
+
+You don't have to use the seed file, the items and locations are created and dynamically updated by the script.
+However, I also added a population table, and tied it back to the locations table - so to make that work for you, I've added the seed.sql file with both locations and population, so your IDs will match up.
+
+PRs welcome!
